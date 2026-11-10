@@ -3,10 +3,10 @@ import pytest
 
 from processminer import processminerSVB
 
-_ = processminerSVB  # Voorkomt Pylance melding 'not accessed'
+_ = processminerSVB  # Avoids the Pylance 'not accessed' warning
 @pytest.fixture
 def sample_df_default():
-    """Fixture met standaard kolomnamen voor tests."""
+    """Fixture with default column names for tests."""
     return pl.DataFrame(
         {
             "case_id": ["C1", "C1", "C2", "C2"],
@@ -33,19 +33,19 @@ def sample_df_default():
 
 @pytest.fixture
 def sample_df_custom():
-    """Fixture met afwijkende kolomnamen om .config() te testen."""
+    """Fixture with custom column names for testing .config()."""
     return pl.DataFrame(
         {
-            "dossier": [1, 1, 2],
-            "stap": ["X", "Y", "X"],
-            "begin": pl.Series(
+            "case_number": [1, 1, 2],
+            "step": ["X", "Y", "X"],
+            "begin_time": pl.Series(
                 [
                     "2026-06-01 08:00:00",
                     "2026-06-01 09:00:00",
                     "2026-06-01 10:00:00",
                 ]
             ).str.to_datetime(),
-            "einde": pl.Series(
+            "finish_time": pl.Series(
                 [
                     "2026-06-01 08:30:00",
                     "2026-06-01 09:30:00",
@@ -86,57 +86,57 @@ def process_log():
 
 
 def test_case_count_default(sample_df_default):
-    """Test of het aantal unieke cases correct wordt geteld met defaults."""
-    aantal = sample_df_default.pm.case_count()
+    """Test that the number of unique cases is counted correctly with defaults."""
+    count = sample_df_default.pm.case_count()
 
-    assert aantal == 2
+    assert count == 2
 
 
 def test_troughput_time_default(sample_df_default):
-    """Test of de doorlooptijd correct wordt berekend met defaults."""
+    """Test that throughput time is calculated correctly with defaults."""
     result = sample_df_default.pm.troughput_time()
 
-    # Controleer of de juiste kolommen aanwezig zijn
+    # Check that the expected columns are present
     assert "case_id" in result.columns
     assert "case_start" in result.columns
     assert "case_end" in result.columns
-    assert "doorlooptijd" in result.columns
+    assert "throughput_time" in result.columns
 
-    # Er moeten 2 rijen zijn (1 voor C1, 1 voor C2)
+    # There should be 2 rows (one for C1 and one for C2)
     assert result.height == 2
 
 
 def test_config_and_custom_columns(sample_df_custom):
-    """Test of .config() werkt en method chaining mogelijk maakt."""
-    # Test aantal cases met custom kolomnaam
-    aantal = sample_df_custom.pm.config(case_id="dossier").case_count()
-    assert aantal == 2
+    """Test that .config() works and supports method chaining."""
+    # Test the case count with a custom column name
+    count = sample_df_custom.pm.config(case_id="case_number").case_count()
+    assert count == 2
 
-    # Test doorlooptijd met volledig geconfigureerde custom kolommen
+    # Test throughput time with fully configured custom columns
     result = (
         sample_df_custom.pm.config(
-            case_id="dossier",  start_time="begin", end_time="einde"
+            case_id="case_number", start_time="begin_time", end_time="finish_time"
         )
-        .filter(pl.col("dossier") == 1)  # Ook controleren of Polars chaining werkt
+        .filter(pl.col("case_number") == 1)  # Also check that Polars chaining works
         .troughput_time()
     )
 
-    assert "dossier" in result.columns
-    assert result.height == 1  # Alleen dossier 1 na filtering
+    assert "case_number" in result.columns
+    assert result.height == 1  # Only case 1 remains after filtering
 
-def test_ontstaan_dataframe():
+def test_dataframe_namespace_creation():
     df = pl.DataFrame(
         {
-            "dossier": [1, 1, 2],
-            "stap": ["X", "Y", "X"],
-            "begin": pl.Series(
+            "case_number": [1, 1, 2],
+            "step": ["X", "Y", "X"],
+            "begin_time": pl.Series(
                 [
                     "2026-06-01 08:00:00",
                     "2026-06-01 09:00:00",
                     "2026-06-01 10:00:00",
                 ]
             ).str.to_datetime(),
-            "einde": pl.Series(
+            "finish_time": pl.Series(
                 [
                     "2026-06-01 08:30:00",
                     "2026-06-01 09:30:00",
@@ -144,7 +144,7 @@ def test_ontstaan_dataframe():
                 ]
             ).str.to_datetime(),
         },
-    ).pm.config(case_id="dossier", start_time="begin", end_time="einde")
+    ).pm.config(case_id="case_number", start_time="begin_time", end_time="finish_time")
 
     assert isinstance(df, processminerSVB)
 
@@ -195,4 +195,3 @@ def test_split_and_unravel(process_log):
     assert len(parts) == 1
     assert parts[0]["activity"].to_list() == ["A", "B", "A"]
     assert unraveled["activity"].to_list() == ["A", "B", "A_2", "C", "A_1"]
-

@@ -9,9 +9,17 @@ import polars as pl
 @pl.api.register_dataframe_namespace("pm")
 class processminerSVB:
     def __init__(self, df: pl.DataFrame):
+        """Initialize the namespace with a DataFrame.
+
+        Args:
+            df (pl.DataFrame): DataFrame to expose through the process-mining namespace.
+
+        Returns:
+            None: This method initializes the namespace instance.
+        """
         self._df = df
 
-        # Standaard kolomnamen
+        # Default column names
         self._case_col = "case_id"
         self._event_col = "activity"
         self._start_col = "start_time"
@@ -20,16 +28,24 @@ class processminerSVB:
 # Internals #################################################################################
 
     def _case_groups(self) -> list[pl.DataFrame]:
-        """Return each case's rows in their original event-log order.
+        """Return a list of DataFrames, each containing a case's rows in their original event-log order.
 
         Returns:
-            list[pl.DataFrame]: list with dataframes per case, in the original order of the events.
+            list[pl.DataFrame]: List of DataFrames, each containing a case's rows in their original event-log order.
         """
         indexed = self._df.with_row_index("__pm_row_index")
         return indexed.partition_by(self._case_col, maintain_order=True)
 
-    def _filter_rows(self, row_indices: set[int]) -> pl.DataFrame:
-        """Return the original rows whose row indices are selected."""
+
+    def _filter_rows_by_indices(self, row_indices: set[int]) -> pl.DataFrame:
+        """Return the original rows with the selected row indices.
+
+        Args:
+            row_indices (set[int]): Row indices to retain.
+
+        Returns:
+            pl.DataFrame: DataFrame containing the selected original rows.
+        """
         return self._df.filter(
             pl.Series(
                 "__pm_selected",
@@ -38,38 +54,89 @@ class processminerSVB:
             )
         )
 
+
     def _filter_values(self, column: str, values: list[object]) -> pl.DataFrame:
+        """Filter rows by values present in a column.
+
+        Args:
+            column (str): Name of the column to inspect.
+            values (list[object]): Values to retain, including None to select nulls.
+
+        Returns:
+            pl.DataFrame: DataFrame containing rows that match the selected values.
+        """
         selected_values = [value for value in values if value is not None]
         predicate = pl.col(column).is_in(selected_values)
         if any(value is None for value in values):
             predicate = predicate | pl.col(column).is_null()
         return self._df.filter(predicate)
 
-    def _select_cases(self, n: int, percentage: float, total: int) -> int:
+
+
+    def _calculate_amount(self, n: int, percentage: float, total: int) -> int:
+        """Determine how many ranked items to select.
+
+        Args:
+            n (int): Maximum number of items to select, or -1 to use the percentage.
+            percentage (float): Fraction of the total to select, between 0 and 1.
+            total (int): Total number of available items.
+
+        Returns:
+            int: Number of items to select.
+        """
         if n < -1:
-            raise ValueError("n moet -1 (alle) of een niet-negatief aantal zijn.")
+            raise ValueError("n must be -1 (all) or a non-negative number.")
         if not 0 <= percentage <= 1:
-            raise ValueError("percentage moet tussen 0 en 1 liggen.")
+            raise ValueError("percentage must be between 0 and 1.")
         percentage_count = ceil(total * percentage)
         return percentage_count if n == -1 else min(n, percentage_count)
 
+
     def _ranked_cases(self, descending: bool) -> list[tuple[object, int]]:
+        """Rank cases by their number of events.
+
+        Args:
+            descending (bool): Whether to sort from the most events to the fewest.
+
+        Returns:
+            list[tuple[object, int]]: Case identifiers paired with event counts, in rank order.
+        """
         ranked: list[tuple[object, int]] = []
         for case in self._case_groups():
             case_id = case[self._case_col][0]
             ranked.append((case_id, case.height))
         return sorted(ranked, key=lambda item: item[1], reverse=descending)
 
+
     def _ranked_event_types(self, descending: bool) -> list[tuple[object, int]]:
+        """Rank event types by their occurrence count.
+
+        Args:
+            descending (bool): Whether to sort from the most occurrences to the fewest.
+
+        Returns:
+            list[tuple[object, int]]: Event types paired with occurrence counts, in rank order.
+        """
         counts: dict[object, int] = {}
         for event in self._df.get_column(self._event_col).to_list():
             counts[event] = counts.get(event, 0) + 1
         ranked = list(counts.items())
         return sorted(ranked, key=lambda item: item[1], reverse=descending)
 
+
     def _aggregate(
         self, aggregation_rules: list[tuple[str, str, str]], group_column: str
     ) -> pl.DataFrame:
+        """Aggregate the DataFrame using the specified rules.
+
+        Args:
+            aggregation_rules (list[tuple[str, str, str]]): Source column, output column,
+                and aggregation function for each aggregation.
+            group_column (str): Column whose values define the groups.
+
+        Returns:
+            pl.DataFrame: DataFrame containing the grouped aggregation results.
+        """
         aggregations = {
             "count": lambda column: column.count(),
             "sum": lambda column: column.sum(),
@@ -84,22 +151,36 @@ class processminerSVB:
         expressions = []
         for source_column, output_column, function in aggregation_rules:
             if source_column not in self._df.columns:
-                raise ValueError(f"Kolom '{source_column}' bestaat niet in de DataFrame.")
+                raise ValueError(f"Column '{source_column}' does not exist in the DataFrame.")
             if function not in aggregations:
                 supported = ", ".join(aggregations)
-                raise ValueError(f"Onbekende aggregatiefunctie '{function}'. Kies uit: {supported}.")
+                raise ValueError(
+                    f"Unknown aggregation function '{function}'. Choose from: {supported}."
+                )
             expressions.append(aggregations[function](pl.col(source_column)).alias(output_column))
         if not expressions:
             return self._df.select(group_column).unique(maintain_order=True)
         return self._df.group_by(group_column, maintain_order=True).agg(expressions)
+# @@@ tot hier gecontroleerd
 
     def _time_window(
         self, starting_points: list[str], ending_points: list[str]
     ) -> list[tuple[pl.DataFrame, int, int]]:
-        """Return inclusive row-order windows between the selected event boundaries."""
+        """Return inclusive row-order windows between the selected event boundaries.
+
+        Args:
+            starting_points (list[str]): Event types that can start a window. An empty list
+                uses the first event in each case.
+            ending_points (list[str]): Event types that can end a window. An empty list
+                uses the last event in each case.
+
+        Returns:
+            list[tuple[pl.DataFrame, int, int]]: Case DataFrames paired with the first and
+                last row positions of each selected window.
+        """
         if (starting_points or ending_points) and self._event_col not in self._df.columns:
             raise ValueError(
-                f"Kolom '{self._event_col}' is nodig om start- of eindpunten te selecteren."
+                f"Column '{self._event_col}' is required to select start or end points."
             )
         windows = []
         for case in self._case_groups():
@@ -127,6 +208,16 @@ class processminerSVB:
     def _time_metrics(
         self, starting_points: list[str], ending_points: list[str], metric: str
     ) -> pl.DataFrame:
+        """Calculate a time metric for each selected case window.
+
+        Args:
+            starting_points (list[str]): Event types that can start a window.
+            ending_points (list[str]): Event types that can end a window.
+            metric (str): Metric to calculate: throughput, processing, or idle time.
+
+        Returns:
+            pl.DataFrame: Per-case start and end times and the calculated duration.
+        """
         records = []
         for case, first, last in self._time_window(starting_points, ending_points):
             events = case.slice(first, last - first + 1)
@@ -191,29 +282,29 @@ class processminerSVB:
         )
 
     def __getattr__(self, name: str):
-        """Zorgt ervoor dat methoden van de onderliggende DataFrame kunnen worden aangeroepen via de namespace wrapper.
+        """Allow methods of the underlying DataFrame to be called via the namespace wrapper.
 
         Args:
-            name (str): De naam van de methode die aangeroepen moet worden.
+            name (str): The name of the method to call.
 
         Returns:
-            _type_: Het resultaat van de aangeroepen methode weer voorzien van de namespace wrapper.
+            object: The requested DataFrame attribute or a wrapper for its callable.
         """
-        # Haal het attribuut op van de onderliggende DataFrame als er gevraagd wordt naar
-        # een attribuut dat niet in de wrapper zit.
+        # Look up attributes not defined by the wrapper on the underlying DataFrame.
         attribute = getattr(self._df, name)
         if not callable(attribute):
             return attribute
 
-        # Als het attribuut een callable is, maak een wrapper functie die de aanroep doorstuurt
-        # naar de onderliggende DataFrame.
+        # Forward callable attributes to the underlying DataFrame.
         def delegated(*args, **kwargs):
-            """Doet de daadwerkelijke aanroep naar een Polars methode, atrribuut of wat dan ook
+            """Call the Polars method and wrap DataFrame results in the pm namespace.
 
-            En pakt het resultaat vervolgens weer netjes in in de pm namespace als het resultaat een dataframe is.
+            Args:
+                *args: Positional arguments passed to the Polars method.
+                **kwargs: Keyword arguments passed to the Polars method.
 
             Returns:
-                _type_: dataframe met pm namespace of een ander type als het resultaat geen dataframe is.
+                object: The Polars method result, wrapped in the namespace if it is a DataFrame.
             """
             result = attribute(*args, **kwargs)
             if isinstance(result, pl.DataFrame):
@@ -237,36 +328,36 @@ class processminerSVB:
         start_time: str = None,
         end_time: str = None,
     ):
-        """Checkt of de kolomnaam bestaat en kent de betekenis toe aan de kolomnaam._
+        """Validate column names and assign their meanings.
 
         Args:
-            case_id (str, optional): _description_. Defaults to None.
-            event_id (str, optional): _description_. Defaults to None.
-            start_time (str, optional): _description_. Defaults to None.
-            end_time (str, optional): _description_. Defaults to None.
+            case_id (str, optional): Name of the case identifier column. Defaults to None.
+            event_id (str, optional): Name of the event type column. Defaults to None.
+            start_time (str, optional): Name of the event start-time column. Defaults to None.
+            end_time (str, optional): Name of the event end-time column. Defaults to None.
 
         Returns:
-            _type_: _description_
+            processminerSVB: This namespace instance, allowing method chaining.
         """
         colomn_names = self._df.columns
 
         if case_id:
             if case_id not in colomn_names:
-                raise ValueError(f"case_id kolom '{case_id}' bestaat niet in de DataFrame.")
+                raise ValueError(f"case_id column '{case_id}' does not exist in the DataFrame.")
             self._case_col = case_id
         if event_id:
             if event_id not in colomn_names:
-                raise ValueError(f"event_id kolom '{event_id}' bestaat niet in de DataFrame.")
+                raise ValueError(f"event_id column '{event_id}' does not exist in the DataFrame.")
             self._event_col = event_id
         if start_time:
             if start_time not in colomn_names:
-                raise ValueError(f"start_time kolom '{start_time}' bestaat niet in de DataFrame.")
+                raise ValueError(f"start_time column '{start_time}' does not exist in the DataFrame.")
             self._start_col = start_time
         if end_time:
             if end_time not in colomn_names:
-                raise ValueError(f"end_time kolom '{end_time}' bestaat niet in de DataFrame.")
+                raise ValueError(f"end_time column '{end_time}' does not exist in the DataFrame.")
             self._end_col = end_time
-        return self  # Geeft self terug zodat je kunt chainen
+        return self
 
 
 # Filters ###########################################################################################
@@ -274,24 +365,24 @@ class processminerSVB:
     def filter_precedence(
         self, antecedents: list[str], consequents: list[str], inverse: bool = False, max_gap: int = -1
     ) -> pl.DataFrame:
-        """Filtert cases met de opgegeven volgordes op basis van de opgegeven antecedenten en consequents.
+        """Filter cases according to the specified antecedents and consequents.
 
-        Een case voldoet als ten minste een antecedent gevolgd wordt door een consequent.
-        max_gap telt alleen events die strikt tussen beide events staan.
+        A case matches if at least one antecedent is followed by a consequent.
+        max_gap counts only events strictly between those two events.
 
         Args:
-            antecedents (list[str]): De antecedenten waarop gefilterd moet worden.
-            consequents (list[str]): De consequents waarop gefilterd moet worden.
-            inverse (bool, optional): Indien True, worden de cases die niet voldoen aan de filtercriteria meegenomen. Defaults to False.
-            max_gap (int, optional): Het maximale aantal events dat tussen het antecedent en consequent mag zitten. Defaults to -1 (geen limiet).
+            antecedents (list[str]): Antecedents to filter by.
+            consequents (list[str]): Consequents to filter by.
+            inverse (bool, optional): If True, include cases that do not match the criteria. Defaults to False.
+            max_gap (int, optional): Maximum number of events allowed between the antecedent and consequent. Defaults to -1 (unlimited).
 
         Returns:
-            pl.DataFrame: Gefilterde DataFrame met alleen de cases die voldoen aan de filtercriteria.
+            pl.DataFrame: Filtered DataFrame containing matching cases.
         """  # noqa: E501
         if not antecedents or not consequents:
-            raise ValueError("antecedents en consequents mogen niet leeg zijn.")
+            raise ValueError("antecedents and consequents must not be empty.")
         if max_gap < -1:
-            raise ValueError("max_gap moet -1 (geen limiet) of een niet-negatief aantal zijn.")
+            raise ValueError("max_gap must be -1 (unlimited) or a non-negative number.")
 
         matching_rows: set[int] = set()
         for case in self._case_groups():
@@ -310,186 +401,206 @@ class processminerSVB:
             )
             if matches != inverse:
                 matching_rows.update(case.get_column("__pm_row_index").to_list())
-        return self._filter_rows(matching_rows)
+        return self._filter_rows_by_indices(matching_rows)
 
     def trim(self, starting_points: list[str] = [], ending_points: list[str] = []) -> pl.DataFrame:
-        """Trimt de DataFrame op basis van de opgegeven start- en eindpunten.
+        """Trim the DataFrame to the specified start and end points.
 
-        Per case wordt de eerste matchende start en de laatste matchende eindactiviteit gebruikt.
-        De grens-events blijven behouden; zonder opgegeven grens wordt de casegrens gebruikt.
+        For each case, use the first matching start and last matching end activity.
+        Boundary events are retained; an unspecified boundary uses the case boundary.
 
         Args:
-            starting_points (list[str], optional): startpunten van de te meten procesdelen. Defaults to [].
-            ending_points (list[str], optional): eindpunten van de te meten procesdelen. Defaults to [].
+            starting_points (list[str], optional): Start points of the process segments to measure. Defaults to [].
+            ending_points (list[str], optional): End points of the process segments to measure. Defaults to [].
 
         Returns:
-            pl.DataFrame: DataFrame met alleen de events tussen de opgegeven start- en eindpunten.
+            pl.DataFrame: DataFrame containing only events between the specified start and end points.
         """
         selected: set[int] = set()
         for case, first, last in self._time_window(starting_points, ending_points):
             selected.update(case.slice(first, last - first + 1).get_column("__pm_row_index").to_list())
-        return self._filter_rows(selected)
+        return self._filter_rows_by_indices(selected)
 
 
     def head_cases(self, n: int = -1, percentage: float = 1.0) -> pl.DataFrame:
-        """Geeft de eerste n of de eerste percentage van de cases terug in de DataFrame.
+        """Return the first n cases or the specified percentage of cases.
 
-        Sorteren en vervolgens head of tail helpt om in te zoomen op meest voorkomede of langst lopende cases enz.
-        Door eerst te sorteren op aantal voorkomens kunnen zo de meest of minst voorkomende cases worden geselecteerd.
-        head_cases sorteert op het aantal events per case, aflopend.
+        Sorting before taking the head or tail helps focus on the most frequent or longest-running cases.
+        Sorting by event count allows the most or least frequent cases to be selected.
+        head_cases sorts cases by event count in descending order.
 
         Args:
-            n (int, optional): Aantal over te houden cases. Defaults to -1 (all).
-            percentage (float, optional): Percentage van de cases dat meegenomen moet worden. Defaults to 1.0 (alle).
+            n (int, optional): Number of cases to keep. Defaults to -1 (all).
+            percentage (float, optional): Percentage of cases to include. Defaults to 1.0 (all).
 
         Returns:
-            pl.DataFrame: Geslicede DataFrame waar alleen de cases tussen de opgegeven start- en eindindex in zitten.
+            pl.DataFrame: Sliced DataFrame containing only the selected cases.
         """
         ranked = self._ranked_cases(descending=True)
-        count = self._select_cases(n, percentage, len(ranked))
+        count = self._calculate_amount(n, percentage, len(ranked))
         return self._filter_values(self._case_col, [case_id for case_id, _ in ranked[:count]])
 
     def tail_cases(self, n: int = -1, percentage: float = 1.0) -> pl.DataFrame:
-        """Geeft de laatste n of de laatste percentage van de cases terug in de DataFrame.
+        """Return the last n cases or the specified percentage of cases.
 
-        Sorteren en vervolgens head of tail helpt om in te zoomen op meest voorkomede of langst lopende cases enz.
-        Door eerst te sorteren op aantal voorkomens kunnen zo de meest of minst voorkomende cases worden geselecteerd.
-        tail_cases sorteert op het aantal events per case, oplopend.
+        Sorting before taking the head or tail helps focus on the most frequent or longest-running cases.
+        Sorting by event count allows the most or least frequent cases to be selected.
+        tail_cases sorts cases by event count in ascending order.
 
         Args:
-            n (int, optional): Aantal over te houden cases. Defaults to -1 (all).
-            percentage (float, optional): Percentage van de cases dat meegenomen moet worden. Defaults to 1.0 (alle).
+            n (int, optional): Number of cases to keep. Defaults to -1 (all).
+            percentage (float, optional): Percentage of cases to include. Defaults to 1.0 (all).
 
         Returns:
-            pl.DataFrame: Geslicede DataFrame waar alleen de cases tussen de opgegeven start- en eindindex in zitten.
+            pl.DataFrame: Sliced DataFrame containing only the selected cases.
         """
         ranked = self._ranked_cases(descending=False)
-        count = self._select_cases(n, percentage, len(ranked))
+        count = self._calculate_amount(n, percentage, len(ranked))
         return self._filter_values(self._case_col, [case_id for case_id, _ in ranked[:count]])
 
     def head_event_types(self, n: int = -1, percentage: float = 1.0) -> pl.DataFrame:
-        """Geeft de eerste n of de eerste percentage van de eventsoorten terug in de DataFrame.
+        """Return the first n event types or the specified percentage of event types.
 
-        De eventsoorten worden aflopend op aantal voorkomens gesorteerd.
+        Event types are sorted by occurrence count in descending order.
 
-        Indien start of einde -1 zijn dan is aan die kant geen limiet en wordt alles meegenomen.
-        Sorteren en vervolgens slicen helpt om in te zoomen op meest voorkomede of langst durende soorten events enz.
-        Door eerst te sorteren op aantal voorkomens kunnen zo de meest of minst voorkomende eventsoorten worden geselecteerd.
+        If n is -1, there is no limit and all event types are included.
+        Sorting before slicing helps focus on the most frequent or longest-running event types.
+        Sorting by occurrence count allows the most or least frequent event types to be selected.
 
         Args:
-            n (int, optional): Aantal over te houden eventsoorten. Defaults to -1 (all).
-            percentage (float, optional): Percentage van de eventsoorten dat meegenomen moet worden. Defaults to 1.0 (alle).
+            n (int, optional): Number of event types to keep. Defaults to -1 (all).
+            percentage (float, optional): Percentage of event types to include. Defaults to 1.0 (all).
 
         Returns:
-            pl.DataFrame: Gefilterd dataframe.
+            pl.DataFrame: Filtered DataFrame.
         """  # noqa: E501
         ranked = self._ranked_event_types(descending=True)
-        count = self._select_cases(n, percentage, len(ranked))
+        count = self._calculate_amount(n, percentage, len(ranked))
         selected = [event for event, _ in ranked[:count]]
         return self._filter_values(self._event_col, selected)
 
     def tail_event_types(self, n: int = -1, percentage: float = 1.0) -> pl.DataFrame:
-        """Geeft de laatste n of de laatste percentage van de eventsoorten terug in de DataFrame.
+        """Return the last n event types or the specified percentage of event types.
 
-        De eventsoorten worden oplopend op aantal voorkomens gesorteerd.
+        Event types are sorted by occurrence count in ascending order.
 
-        Indien start of einde -1 zijn dan is aan die kant geen limiet en wordt alles meegenomen.
-        Sorteren en vervolgens slicen helpt om in te zoomen op meest voorkomede of langst durende soorten events enz.
-        Door eerst te sorteren op aantal voorkomens kunnen zo de meest of minst voorkomende eventsoorten worden geselecteerd.
+        If n is -1, there is no limit and all event types are included.
+        Sorting before slicing helps focus on the most frequent or longest-running event types.
+        Sorting by occurrence count allows the most or least frequent event types to be selected.
 
         Args:
-            n (int, optional): Aantal over te houden eventsoorten. Defaults to -1 (all).
-            percentage (float, optional): Percentage van de eventsoorten dat meegenomen moet worden. Defaults to 1.0 (alle).
+            n (int, optional): Number of event types to keep. Defaults to -1 (all).
+            percentage (float, optional): Percentage of event types to include. Defaults to 1.0 (all).
 
         Returns:
-            pl.DataFrame: Gefilterd dataframe.
+            pl.DataFrame: Filtered DataFrame.
         """  # noqa: E501
         ranked = self._ranked_event_types(descending=False)
-        count = self._select_cases(n, percentage, len(ranked))
+        count = self._calculate_amount(n, percentage, len(ranked))
         selected = [event for event, _ in ranked[:count]]
         return self._filter_values(self._event_col, selected)
 
 
-# Enrichement ############################################################################################
+# Enrichment ############################################################################################
 
     def troughput_time(self) -> pl.DataFrame:
-        """Berekent de totale doorlooptijd per case."""
-        return self._time_metrics([], [], "throughput").rename(
-            {"throughput_time": "doorlooptijd"}
-        )
+        """Calculate the total throughput time per case.
+
+        Returns:
+            pl.DataFrame: Per-case start and end times and total throughput time.
+        """
+        return self._time_metrics([], [], "throughput")
 
     def case_count(self) -> int:
-        """Geeft het unieke aantal cases terug."""
+        """Return the number of unique cases.
+
+        Returns:
+            int: Number of unique case identifiers in the DataFrame.
+        """
         return self._df.select(pl.col(self._case_col).n_unique()).item()
 
     def agg_per_case(self, aggregation_rules: list[tuple[str, str, str]]) -> pl.DataFrame:
-        """Aggegreert de DataFrame op basis van aggregatie regels over de case_id kolom.
+        """Aggregate the DataFrame by case using the specified aggregation rules.
 
-        Elke regel is (bronkolom, uitvoerkolom, functie), bijvoorbeeld
+        Each rule is (source column, output column, function), for example
         ("amount", "total_amount", "sum").
 
+        Args:
+            aggregation_rules (list[tuple[str, str, str]]): Source column, output column,
+                and aggregation function for each aggregation.
+
         Returns:
-            pl.DataFrame: Geaggregeerde DataFrame.
+            pl.DataFrame: Aggregated DataFrame.
         """
         return self._aggregate(aggregation_rules, self._case_col)
 
 
     def agg_per_event_type(self, aggregation_rules: list[tuple[str, str, str]]) -> pl.DataFrame:
-        """Aggegreert de DataFrame op basis van aggregatie regels over de event_id kolom.
+        """Aggregate the DataFrame by event type using the specified aggregation rules.
 
-        Elke regel is (bronkolom, uitvoerkolom, functie), bijvoorbeeld
+        Each rule is (source column, output column, function), for example
         ("amount", "average_amount", "mean").
 
+        Args:
+            aggregation_rules (list[tuple[str, str, str]]): Source column, output column,
+                and aggregation function for each aggregation.
+
         Returns:
-            pl.DataFrame: Geaggregeerde DataFrame.
+            pl.DataFrame: Aggregated DataFrame.
         """  # noqa: E501
         return self._aggregate(aggregation_rules, self._event_col)
 
 
 
     def throughput_time(self, starting_points: list[str] = [], ending_points: list[str] = []) -> pl.DataFrame:
-        """Bereken de doorlooptijd per case.
+        """Calculate the throughput time per case.
 
-        Indien starting_points en of ending_points zijn opgegeven, wordt de doorlooptijd berekend tussen deze punten.
-        Niet opgegeven grenzen vallen terug op de eerste respectievelijk laatste event van de case.
+        If starting_points and/or ending_points are specified, calculate throughput time between those points.
+        Unspecified boundaries default to the first or last event of the case, respectively.
 
         Args:
-            starting_points (list[str], optional): startpunten van de te meten procesdelen. Defaults to [].
-            ending_points (list[str], optional): eindpunten van de te meten procesdelen. Defaults to [].
+            starting_points (list[str], optional): Start points of the process segments to
+                measure. Defaults to [].
+            ending_points (list[str], optional): End points of the process segments to
+                measure. Defaults to [].
 
         Returns:
-            pl.DataFrame: DataFrame met case_id, case_start, case_end en throughput_time kolommen.
+            pl.DataFrame: DataFrame with case_id, case_start, case_end, and throughput_time columns.
         """
         return self._time_metrics(starting_points, ending_points, "throughput")
 
 
     def processing_time(self, starting_points: list[str] = [], ending_points: list[str] = []) -> pl.DataFrame:
-        """Bereken de verwerkingstijd per case.
+        """Calculate the processing time per case.
 
-        De verwerkingstijd is de som van end_time - start_time per event in de gekozen case-window.
+        Processing time is the sum of end_time - start_time for each event in the selected case window.
 
         Args:
-            starting_points (list[str], optional): startpunten van de te meten procesdelen. Defaults to [].
-            ending_points (list[str], optional): eindpunten van de te meten procesdelen. Defaults to [].
+            starting_points (list[str], optional): Start points of the process segments to
+                measure. Defaults to [].
+            ending_points (list[str], optional): End points of the process segments to
+                measure. Defaults to [].
 
         Returns:
-            pl.DataFrame: DataFrame met case_id, case_start, case_end en processing_time kolommen.
+            pl.DataFrame: DataFrame with case_id, case_start, case_end, and processing_time columns.
         """
         return self._time_metrics(starting_points, ending_points, "processing")
 
 
     def idle_time(self, starting_points: list[str] = [], ending_points: list[str] = []) -> pl.DataFrame:
-        """Bereken de inactieve tijd per case.
+        """Calculate the idle time per case.
 
-        De inactieve tijd is de som van positieve gaps tussen een event-end en het volgende event-start
-        binnen de gekozen case-window.
+        Idle time is the sum of positive gaps between an event end and the next event start
+        within the selected case window.
 
         Args:
-            starting_points (list[str], optional): startpunten van de te meten procesdelen. Defaults to [].
-            ending_points (list[str], optional): eindpunten van de te meten procesdelen. Defaults to [].
+            starting_points (list[str], optional): Start points of the process segments to
+                measure. Defaults to [].
+            ending_points (list[str], optional): End points of the process segments to
+                measure. Defaults to [].
 
         Returns:
-            pl.DataFrame: DataFrame met case_id, case_start, case_end en idle_time kolommen.
+            pl.DataFrame: DataFrame with case_id, case_start, case_end, and idle_time columns.
         """
         return self._time_metrics(starting_points, ending_points, "idle")
 
@@ -497,20 +608,20 @@ class processminerSVB:
     def split(
         self, seperation_events: list[str], events_preceding: int = -1, events_following: int = -1
     ) -> list[pl.DataFrame]:
-        """Splitst de DataFrame op basis van de opgegeven scheidingsevents.
+        """Split the DataFrame based on the specified separator events.
 
-        Elke match levert een apart venster op; het scheidingsevent zelf is inbegrepen.
+        Each match produces a separate window; the separator event itself is included.
 
         Args:
-            seperation_events (list[str]): De events waarop gesplitst moet worden.
-            events_preceding (int, optional): Het aantal events dat voorafgaand aan het scheidingsevent meegenomen moet worden. Defaults to -1 (alle).
-            events_following (int, optional): Het aantal events dat volgend op het scheidingsevent meegenomen moet worden. Defaults to -1 (alle).
+            seperation_events (list[str]): Events on which to split.
+            events_preceding (int, optional): Number of events to include before the separator event. Defaults to -1 (all).
+            events_following (int, optional): Number of events to include after the separator event. Defaults to -1 (all).
 
         Returns:
-            list[pl.DataFrame]: Lijst van DataFrames met de gesplitste cases.
+            list[pl.DataFrame]: List of DataFrames containing the split cases.
         """  # noqa: E501
         if events_preceding < -1 or events_following < -1:
-            raise ValueError("events_preceding en events_following moeten -1 of niet-negatief zijn.")
+            raise ValueError("events_preceding and events_following must be -1 or non-negative.")
 
         parts = []
         for case in self._case_groups():
@@ -525,18 +636,18 @@ class processminerSVB:
                     else min(case.height - 1, index + events_following)
                 )
                 row_indices = set(case.slice(first, last - first + 1)["__pm_row_index"].to_list())
-                parts.append(self._filter_rows(row_indices))
+                parts.append(self._filter_rows_by_indices(row_indices))
         return parts
 
 
     def unravel(self, event_types: list[str] = []) -> pl.DataFrame:
-        """Maakt van de DataFrame een 'unraveled' versie, waarbij event uitgebreid wordt met een nr.
+        """Create an unraveled version of the DataFrame, suffixing events with their position.
 
-        Het nummer is de nulgebaseerde positie in de case. Het eerste event blijft ongewijzigd;
-        alleen geselecteerde eventsoorten krijgen vanaf de tweede positie een suffix.
+        The number is the zero-based position in the case. The first event remains unchanged;
+        only selected event types receive a suffix, starting from the second position.
 
         Args:
-            event_types (list(str)): Indien gevuld worden alleen die event_types unraveled. Defaults to [].
+            event_types (list[str]): If provided, only these event types are unraveled. Defaults to [].
 
         Returns:
             pl.DataFrame: Unraveled DataFrame.

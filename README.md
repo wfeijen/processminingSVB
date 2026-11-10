@@ -1,9 +1,9 @@
 
 # Processminer
 
-Een kleine Python-library met de class `processminer`.
+A small Python library with the `processminer` class.
 
-## Gebruik
+## Usage
 
 ```python
 from processminer import processminer
@@ -12,7 +12,7 @@ miner = processminer()
 print(miner.hello_world())
 ```
 
-Dit print:
+This prints:
 
 ```text
 Hello, world!
