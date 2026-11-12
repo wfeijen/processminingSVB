@@ -161,9 +161,9 @@ class processminerSVB:
         if not expressions:
             return self._df.select(group_column).unique(maintain_order=True)
         return self._df.group_by(group_column, maintain_order=True).agg(expressions)
-# @@@ tot hier gecontroleerd
 
-    def _time_window(
+
+    def _trim_interval(
         self, starting_points: list[str], ending_points: list[str]
     ) -> list[tuple[pl.DataFrame, int, int]]:
         """Return inclusive row-order windows between the selected event boundaries.
@@ -219,7 +219,7 @@ class processminerSVB:
             pl.DataFrame: Per-case start and end times and the calculated duration.
         """
         records = []
-        for case, first, last in self._time_window(starting_points, ending_points):
+        for case, first, last in self._trim_interval(starting_points, ending_points):
             events = case.slice(first, last - first + 1)
             starts = events.get_column(self._start_col).to_list()
             ends = events.get_column(self._end_col).to_list()
@@ -401,7 +401,8 @@ class processminerSVB:
             )
             if matches != inverse:
                 matching_rows.update(case.get_column("__pm_row_index").to_list())
-        return self._filter_rows_by_indices(matching_rows)
+        return self._filter_rows_by_indices(matching_rows)\
+
 
     def trim(self, starting_points: list[str] = [], ending_points: list[str] = []) -> pl.DataFrame:
         """Trim the DataFrame to the specified start and end points.
@@ -417,7 +418,7 @@ class processminerSVB:
             pl.DataFrame: DataFrame containing only events between the specified start and end points.
         """
         selected: set[int] = set()
-        for case, first, last in self._time_window(starting_points, ending_points):
+        for case, first, last in self._trim_interval(starting_points, ending_points):
             selected.update(case.slice(first, last - first + 1).get_column("__pm_row_index").to_list())
         return self._filter_rows_by_indices(selected)
 
@@ -440,6 +441,7 @@ class processminerSVB:
         count = self._calculate_amount(n, percentage, len(ranked))
         return self._filter_values(self._case_col, [case_id for case_id, _ in ranked[:count]])
 
+
     def tail_cases(self, n: int = -1, percentage: float = 1.0) -> pl.DataFrame:
         """Return the last n cases or the specified percentage of cases.
 
@@ -457,6 +459,7 @@ class processminerSVB:
         ranked = self._ranked_cases(descending=False)
         count = self._calculate_amount(n, percentage, len(ranked))
         return self._filter_values(self._case_col, [case_id for case_id, _ in ranked[:count]])
+    
 
     def head_event_types(self, n: int = -1, percentage: float = 1.0) -> pl.DataFrame:
         """Return the first n event types or the specified percentage of event types.
@@ -478,6 +481,7 @@ class processminerSVB:
         count = self._calculate_amount(n, percentage, len(ranked))
         selected = [event for event, _ in ranked[:count]]
         return self._filter_values(self._event_col, selected)
+
 
     def tail_event_types(self, n: int = -1, percentage: float = 1.0) -> pl.DataFrame:
         """Return the last n event types or the specified percentage of event types.
@@ -641,10 +645,10 @@ class processminerSVB:
 
 
     def unravel(self, event_types: list[str] = []) -> pl.DataFrame:
-        """Create an unraveled version of the DataFrame, suffixing events with their position.
+        """Create an unraveled version, suffixing repeated events by occurrence count.
 
-        The number is the zero-based position in the case. The first event remains unchanged;
-        only selected event types receive a suffix, starting from the second position.
+        The first occurrence of each event remains unchanged. Later occurrences receive
+        a zero-based suffix that counts earlier occurrences of that same event in the case.
 
         Args:
             event_types (list[str]): If provided, only these event types are unraveled. Defaults to [].
@@ -655,16 +659,17 @@ class processminerSVB:
         selected_types = set(event_types)
         new_values = self._df.get_column(self._event_col).to_list()
         for case in self._case_groups():
-            for position, (event, row_index) in enumerate(
-                zip(
-                    case.get_column(self._event_col).to_list(),
-                    case.get_column("__pm_row_index").to_list(),
-                )
+            occurrence_counts = {}
+            for event, row_index in zip(
+                case.get_column(self._event_col).to_list(),
+                case.get_column("__pm_row_index").to_list(),
             ):
                 if event is None or (selected_types and event not in selected_types):
                     continue
-                if position:
-                    new_values[row_index] = f"{event}_{position}"
+                occurrence = occurrence_counts.get(event, 0)
+                if occurrence:
+                    new_values[row_index] = f"{event}_{occurrence}"
+                occurrence_counts[event] = occurrence + 1
         return self._df.with_columns(
             pl.Series(self._event_col, new_values, dtype=pl.String)
         )
