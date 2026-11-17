@@ -39,7 +39,7 @@ def _make_process_log(
             activities.append(activity)
             starts.append(event_start)
             ends.append(event_start + timedelta(minutes=5))
-            amounts.append(1)
+            amounts.append(position)
 
     return pl.DataFrame(
         {
@@ -143,10 +143,13 @@ def test_trim_and_case_and_event_slices(process_log):
 
 def test_aggregations(process_log):
     per_case = process_log.pm.agg_per_case([("amount", "amount_total", "sum")])
-    per_event = process_log.pm.agg_per_event_type([("amount", "amount_mean", "mean")])
+    per_event = process_log.pm.agg_per_event_type(
+        [("amount", "amount_mean", "mean"), ("amount", "amount", "sum")]
+    )
 
-    assert per_case.sort("case_id")["amount_total"].to_list() == [12, 24, 12, 35, 1]
-    assert per_event.filter(pl.col("activity") == "A")["amount_mean"].item() == 1
+    assert per_case.sort("case_id")["amount_total"].to_list() == [66, 276, 66, 595, 0]
+    assert round(per_event.filter(pl.col("activity") == "A")["amount_mean"].item(), 2) == 11.52
+    assert per_event.filter(pl.col("activity") == "A")["amount"].item() == 484
 
 
 def test_time_metrics_and_selected_points(process_log):
